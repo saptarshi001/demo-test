@@ -19,21 +19,17 @@ pipeline {
         stage('Build Docker Image (CI)') {
             steps {
                 echo "Building Docker image: ${APP_NAME}:${IMAGE_TAG}..."
-                sh "docker build -t ${APP_NAME}:${IMAGE_TAG} -t ${APP_NAME}:latest ."
+                bat "docker build -t ${APP_NAME}:${IMAGE_TAG} -t ${APP_NAME}:latest ."
             }
         }
 
         stage('Deploy Container (CD)') {
             steps {
                 echo "Deploying container on port ${HOST_PORT}..."
-                sh """
-                    docker stop ${CONTAINER_NAME} || true
-                    docker rm ${CONTAINER_NAME} || true
-                    docker run -d \
-                      --name ${CONTAINER_NAME} \
-                      --restart unless-stopped \
-                      -p ${HOST_PORT}:${CONTAINER_PORT} \
-                      ${APP_NAME}:${IMAGE_TAG}
+                bat """
+                    docker stop ${CONTAINER_NAME} || ver > nul
+                    docker rm ${CONTAINER_NAME} || ver > nul
+                    docker run -d --name ${CONTAINER_NAME} --restart unless-stopped -p ${HOST_PORT}:${CONTAINER_PORT} ${APP_NAME}:${IMAGE_TAG}
                 """
             }
         }
@@ -41,8 +37,8 @@ pipeline {
         stage('Health Check') {
             steps {
                 echo "Testing REST API endpoints..."
-                sh """
-                    sleep 10
+                bat """
+                    timeout /t 10 /nobreak
                     curl -f http://localhost:${HOST_PORT}/api/hello || exit 1
                 """
             }
