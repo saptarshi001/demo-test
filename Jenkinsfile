@@ -36,10 +36,13 @@ pipeline {
 
         stage('Health Check') {
             steps {
-                echo "Verifying deployment..."
+                echo "Waiting 15 seconds for Spring Boot container to initialize..."
+                // Native Jenkins pipeline sleep (avoids Windows batch redirection errors)
+                sleep(time: 15, unit: 'SECONDS')
+
+                echo "Verifying API health endpoint..."
                 bat """
-                    timeout /t 10 /nobreak
-                    curl -f http://localhost:${HOST_PORT}/api/hello || exit 1
+                    curl --retry 5 --retry-connrefused --retry-delay 3 -f http://localhost:${HOST_PORT}/api/hello || exit 1
                 """
             }
         }
