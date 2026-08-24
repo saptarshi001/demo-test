@@ -36,7 +36,7 @@ pipeline {
 
         stage('Health Check') {
             steps {
-                echo "Testing REST API endpoints..."
+                echo "Verifying deployment..."
                 bat """
                     timeout /t 10 /nobreak
                     curl -f http://localhost:${HOST_PORT}/api/hello || exit 1
@@ -47,10 +47,10 @@ pipeline {
 
     post {
         success {
-            echo "Deployment verified! Test your API at http://localhost:${HOST_PORT}/api/hello"
+            echo "Container deployed! Swagger UI is accessible at: http://localhost:${HOST_PORT}/swagger-ui/index.html"
         }
         failure {
-            echo "Pipeline failed. Check container logs using 'docker logs ${CONTAINER_NAME}'"
+            echo "Build failed. Check docker logs or build console output."
         }
     }
 }
