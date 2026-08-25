@@ -6,12 +6,6 @@ pipeline {
         disableConcurrentBuilds()
     }
 
-    tools {
-        // Ensure Maven and JDK match the names configured under 'Global Tool Configuration'
-        maven 'Maven-3.9.6'
-        jdk 'JDK-17'
-    }
-
     environment {
         APP_NAME        = 'simple-rest-api'
         IMAGE_TAG       = "${BUILD_NUMBER}"
