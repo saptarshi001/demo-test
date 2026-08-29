@@ -93,6 +93,7 @@ pipeline {
 }
 
 // Function to extract stage logs, encode to Base64, and post cleanly using a file wrapper
+// Safe function to pull exact stage logs from execution memory, encode to Base64, and post via file
 def sendFullStageNotification(String stageName, String status, long startTime) {
     long endTime = System.currentTimeMillis()
     long duration = endTime - startTime
@@ -100,17 +101,13 @@ def sendFullStageNotification(String stageName, String status, long startTime) {
     String stageLogContent = ""
     
     try {
-        // Access the primary Jenkins raw runtime log file directly on disk
-        def logFile = currentBuild.rawBuild.getLogFile()
+        // Read lines directly from the native Jenkins memory buffer safely (up to 10,000 lines)
+        List<String> logLines = currentBuild.rawBuild.getLog(10000) [1]
         StringBuilder logBuilder = new StringBuilder()
-        
-        BufferedReader reader = new BufferedReader(new FileReader(logFile))
-        String line
         boolean insideTargetStage = false
         
-        // Loop through the log file up to this point
-        while ((line = reader.readLine()) != null) {
-            // Jenkins wraps stage boundaries in explicit brackets
+        for (String line : logLines) {
+            // Jenkins wraps stage boundaries in explicit markers
             if (line.contains("[Pipeline] { (" + stageName + ")")) {
                 insideTargetStage = true
                 continue
@@ -124,8 +121,18 @@ def sendFullStageNotification(String stageName, String status, long startTime) {
                 logBuilder.append(line).append("\n")
             }
         }
-        reader.close()
+        
         stageLogContent = logBuilder.toString()
+        
+        // If the specific block wasn't captured, grab the trailing log fragments as a backup
+        if (stageLogContent.trim().isEmpty()) {
+            int totalLines = logLines.size()
+            int startIdx = Math.max(0, totalLines - 100) // Fallback to last 100 lines of execution context
+            for (int i = startIdx; i < totalLines; i++) {
+                logBuilder.append(logLines.get(i)).append("\n")
+            }
+            stageLogContent = "--- Fallback Log Window ---\n" + logBuilder.toString()
+        }
     } catch (Exception ex) {
         stageLogContent = "Could not pull live Jenkins logs programmatically: ${ex.message}"
     }
@@ -133,12 +140,12 @@ def sendFullStageNotification(String stageName, String status, long startTime) {
     // Convert raw log string into a safe Base64 string directly in memory
     String base64Logs = ""
     try {
-        base64Logs = Base64.getEncoder().encodeToString(stageLogContent.getBytes("UTF-8"))
+        base64Logs = java.util.Base64.getEncoder().encodeToString(stageLogContent.getBytes("UTF-8"))
     } catch (Exception e) {
-        base64Logs = Base64.getEncoder().encodeToString("Error encoding logs to Base64".getBytes("UTF-8"))
+        base64Logs = java.util.Base64.getEncoder().encodeToString("Error encoding logs to Base64".getBytes("UTF-8"))
     }
 
-    // Create the final payload payload map with the clean Base64 string
+    // Create the final payload map with the clean Base64 string assigned to the message field
     String jsonPayload = """{
   "id": "${env.JOB_NAME}-${env.BUILD_NUMBER}-${stageName.replaceAll(' ', '_')}",
   "level": "${(status == 'FAILED') ? 'ERROR' : 'INFO'}",
@@ -167,7 +174,7 @@ def sendFullStageNotification(String stageName, String status, long startTime) {
     } catch (Exception e) {
         echo "Failed to dispatch complete log data to endpoint for stage ${stageName}: ${e.message}"
     } finally {
-        // Safe file cleanup step using native Windows commands instead of plugin dependencies
+        // Safe file cleanup step using native Windows commands
         bat "del /f /q ${filename} 2>nul || ver > nul"
     }
 }
