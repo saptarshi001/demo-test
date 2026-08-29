@@ -1,3 +1,7 @@
+import java.io.BufferedReader
+import java.io.FileReader
+import java.util.Base64
+
 pipeline {
     agent any
 
@@ -22,9 +26,9 @@ pipeline {
                     long startTime = System.currentTimeMillis()
                     try {
                         checkout scm
-                        sendStatusNotification('Checkout', 'SUCCESS', startTime)
+                        sendFullStageNotification('Checkout', 'SUCCESS', startTime)
                     } catch (Exception e) {
-                        sendStatusNotification('Checkout', 'FAILED', startTime)
+                        sendFullStageNotification('Checkout', 'FAILED', startTime)
                         throw e
                     }
                 }
@@ -38,9 +42,9 @@ pipeline {
                     try {
                         echo "Building Docker image: ${APP_NAME}:${IMAGE_TAG}..."
                         bat "docker build -t ${APP_NAME}:${IMAGE_TAG} -t ${APP_NAME}:latest ."
-                        sendStatusNotification('Build', 'SUCCESS', startTime)
+                        sendFullStageNotification('Build', 'SUCCESS', startTime)
                     } catch (Exception e) {
-                        sendStatusNotification('Build', 'FAILED', startTime)
+                        sendFullStageNotification('Build', 'FAILED', startTime)
                         throw e
                     }
                 }
@@ -67,9 +71,9 @@ pipeline {
                                 curl --fail --retry 3 --retry-connrefused --retry-delay 2 http://localhost:${HOST_PORT}/api/hello
                             """
                         }
-                        sendStatusNotification('Deploy', 'SUCCESS', startTime)
+                        sendFullStageNotification('Deploy', 'SUCCESS', startTime)
                     } catch (Exception e) {
-                        sendStatusNotification('Deploy', 'FAILED', startTime)
+                        sendFullStageNotification('Deploy', 'FAILED', startTime)
                         throw e
                     }
                 }
@@ -88,35 +92,82 @@ pipeline {
     }
 }
 
-// Reusable Shared Function using Windows bat curl to dispatch data
-def sendStatusNotification(String stageName, String status, long startTime) {
+// Function to extract stage logs, encode to Base64, and post cleanly using a file wrapper
+def sendFullStageNotification(String stageName, String status, long startTime) {
     long endTime = System.currentTimeMillis()
     long duration = endTime - startTime
     
-    // Format JSON safely for Windows batch execution (double quotes escaped as \")
-    String payload = """{
-        \\"id\\": \\"${env.JOB_NAME}-${env.BUILD_NUMBER}-${stageName.replaceAll(' ', '_')}\\",
-        \\"level\\": \\"${(status == 'FAILED') ? 'ERROR' : 'INFO'}\\",
-        \\"message\\": \\"Stage '${stageName}' finished with status: ${status}\\",
-        \\"timestamp\\": ${endTime},
-        \\"metadata\\": {
-            \\"jobName\\": \\"${env.JOB_NAME}\\",
-            \\"buildNumber\\": \\"${env.BUILD_NUMBER}\\",
-            \\"stageName\\": \\"${stageName}\\",
-            \\"status\\": \\"${status}\\",
-            \\"durationMs\\": ${duration}
-        }
-    }"""
-
+    String stageLogContent = ""
+    
     try {
-        // Run curl step natively matching your precise endpoint specifications
+        // Access the primary Jenkins raw runtime log file directly on disk
+        def logFile = currentBuild.rawBuild.getLogFile()
+        StringBuilder logBuilder = new StringBuilder()
+        
+        BufferedReader reader = new BufferedReader(new FileReader(logFile))
+        String line
+        boolean insideTargetStage = false
+        
+        // Loop through the log file up to this point
+        while ((line = reader.readLine()) != null) {
+            // Jenkins wraps stage boundaries in explicit brackets
+            if (line.contains("[Pipeline] { (" + stageName + ")")) {
+                insideTargetStage = true
+                continue
+            }
+            // Detect when this specific stage closes out
+            if (insideTargetStage && line.contains("[Pipeline] }") && line.contains("Stage (" + stageName + ")")) {
+                insideTargetStage = false
+            }
+            // Capture everything printed in between
+            if (insideTargetStage) {
+                logBuilder.append(line).append("\n")
+            }
+        }
+        reader.close()
+        stageLogContent = logBuilder.toString()
+    } catch (Exception ex) {
+        stageLogContent = "Could not pull live Jenkins logs programmatically: ${ex.message}"
+    }
+
+    // Convert raw log string into a safe Base64 string directly in memory
+    String base64Logs = ""
+    try {
+        base64Logs = Base64.getEncoder().encodeToString(stageLogContent.getBytes("UTF-8"))
+    } catch (Exception e) {
+        base64Logs = Base64.getEncoder().encodeToString("Error encoding logs to Base64".getBytes("UTF-8"))
+    }
+
+    // Create the final payload payload map with the clean Base64 string
+    String jsonPayload = """{
+  "id": "${env.JOB_NAME}-${env.BUILD_NUMBER}-${stageName.replaceAll(' ', '_')}",
+  "level": "${(status == 'FAILED') ? 'ERROR' : 'INFO'}",
+  "message": "${base64Logs}",
+  "timestamp": ${endTime},
+  "metadata": {
+    "jobName": "${env.JOB_NAME}",
+    "buildNumber": "${env.BUILD_NUMBER}",
+    "stageName": "${stageName}",
+    "status": "${status}",
+    "durationMs": ${duration}
+  }
+}"""
+
+    String filename = "payload_${stageName.replaceAll(' ', '_')}.json"
+    try {
+        // Save the JSON payload to the workspace disk to bypass shell character limitations
+        writeFile file: filename, text: jsonPayload, encoding: 'UTF-8'
+        
+        // Use '@' notation to instruct curl to push the binary file contents safely
         bat """
             curl --location "${env.LOCAL_API_URL}" ^
             --header "Content-Type: application/json" ^
-            --data "${payload.replaceAll('\n', '').replaceAll(' +', ' ')}"
+            --data-binary "@${filename}"
         """
     } catch (Exception e) {
-        // Keeps pipeline healthy if the logging infrastructure acts up
-        echo "Failed to dispatch log via curl for stage ${stageName}: ${e.message}"
+        echo "Failed to dispatch complete log data to endpoint for stage ${stageName}: ${e.message}"
+    } finally {
+        // Safe file cleanup step using native Windows commands instead of plugin dependencies
+        bat "del /f /q ${filename} 2>nul || ver > nul"
     }
 }
