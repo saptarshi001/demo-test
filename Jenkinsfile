@@ -12,28 +12,58 @@ pipeline {
         CONTAINER_NAME  = 'simple-api-container'
         HOST_PORT       = '8082'
         CONTAINER_PORT  = '8080'
-        NOTIFICATION_TO = 'team-devops@example.com'
+        LOCAL_API_URL   = 'http://localhost:8080/api/logs'
     }
 
     stages {
         stage('Checkout') {
             steps {
-                checkout scm
+                script {
+                    long startTime = System.currentTimeMillis()
+                    try {
+                        checkout scm
+                        sendStatusNotification('Checkout', 'SUCCESS', startTime)
+                    } catch (Exception e) {
+                        sendStatusNotification('Checkout', 'FAILED', startTime)
+                        throw e
+                    }
+                }
             }
         }
 
-        stage('Test & Code Coverage') {
+        stage('Build') {
             steps {
-                echo "Running unit tests and generating JaCoCo coverage report..."
-                // Runs Maven build, runs JUnit tests, and creates jacoco coverage exec/xml
-                bat "mvn clean test jacoco:report"
+                script {
+                    long startTime = System.currentTimeMillis()
+                    try {
+                        echo "Building Docker image: ${APP_NAME}:${IMAGE_TAG}..."
+                        bat "docker build -t ${APP_NAME}:${IMAGE_TAG} -t ${APP_NAME}:latest ."
+                        sendStatusNotification('Build', 'SUCCESS', startTime)
+                    } catch (Exception e) {
+                        sendStatusNotification('Build', 'FAILED', startTime)
+                        throw e
+                    }
+                }
+            }
+        }
+
+        stage('Test') {
+            steps {
+                script {
+                    long startTime = System.currentTimeMillis()
+                    try {
+                        echo "Running unit tests and generating JaCoCo coverage report..."
+                        bat "mvn clean test jacoco:report"
+                        sendStatusNotification('Test', 'SUCCESS', startTime)
+                    } catch (Exception e) {
+                        sendStatusNotification('Test', 'FAILED', startTime)
+                        throw e
+                    }
+                }
             }
             post {
                 always {
-                    // Record JUnit Test Results
                     junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml'
-
-                    // Publish Code Coverage Results
                     recordCoverage(
                         tools: [[parser: 'JACOCO', pattern: '**/target/site/jacoco/jacoco.xml']],
                         id: 'jacoco',
@@ -43,33 +73,31 @@ pipeline {
             }
         }
 
-        stage('Build Docker Image') {
+        stage('Deploy') {
             steps {
-                echo "Building Docker image: ${APP_NAME}:${IMAGE_TAG}..."
-                bat "docker build -t ${APP_NAME}:${IMAGE_TAG} -t ${APP_NAME}:latest ."
-            }
-        }
+                script {
+                    long startTime = System.currentTimeMillis()
+                    try {
+                        echo "Replacing old container and starting ${APP_NAME}:${IMAGE_TAG} on port ${HOST_PORT}..."
+                        bat """
+                            docker rm -f ${CONTAINER_NAME} 2>nul || ver > nul
+                            docker run -d --name ${CONTAINER_NAME} --restart unless-stopped -p ${HOST_PORT}:${CONTAINER_PORT} ${APP_NAME}:${IMAGE_TAG}
+                        """
+                        
+                        echo "Waiting for container initialization..."
+                        sleep(time: 15, unit: 'SECONDS')
 
-        stage('Deploy Container') {
-            steps {
-                echo "Replacing old container and starting ${APP_NAME}:${IMAGE_TAG} on port ${HOST_PORT}..."
-                bat """
-                    docker rm -f ${CONTAINER_NAME} 2>nul || ver > nul
-                    docker run -d --name ${CONTAINER_NAME} --restart unless-stopped -p ${HOST_PORT}:${CONTAINER_PORT} ${APP_NAME}:${IMAGE_TAG}
-                """
-            }
-        }
-
-        stage('Health Check') {
-            steps {
-                echo "Waiting for container initialization..."
-                sleep(time: 15, unit: 'SECONDS')
-
-                echo "Verifying API health endpoint..."
-                retry(3) {
-                    bat """
-                        curl --fail --retry 3 --retry-connrefused --retry-delay 2 http://localhost:${HOST_PORT}/api/hello
-                    """
+                        echo "Verifying API health endpoint..."
+                        retry(3) {
+                            bat """
+                                curl --fail --retry 3 --retry-connrefused --retry-delay 2 http://localhost:${HOST_PORT}/api/hello
+                            """
+                        }
+                        sendStatusNotification('Deploy', 'SUCCESS', startTime)
+                    } catch (Exception e) {
+                        sendStatusNotification('Deploy', 'FAILED', startTime)
+                        throw e
+                    }
                 }
             }
         }
@@ -77,36 +105,44 @@ pipeline {
 
     post {
         always {
-            // Prune dangling images created during the build step
             bat "docker image prune -f 2>nul || ver > nul"
-
-            // Asynchronous, non-blocking email notification
-            script {
-                parallel(
-                    "Async Email Notification": {
-                        try {
-                            emailext (
-                                to: "${NOTIFICATION_TO}",
-                                subject: "Build ${currentBuild.currentResult}: Job '${env.JOB_NAME}' [${env.BUILD_NUMBER}]",
-                                body: """
-                                    <p>Build Status: <b>${currentBuild.currentResult}</b></p>
-                                    <p>Project: ${env.JOB_NAME} (Build #${env.BUILD_NUMBER})</p>
-                                    <p>API Endpoint: <a href="http://localhost:${HOST_PORT}/api/hello">http://localhost:${HOST_PORT}/api/hello</a></p>
-                                    <p>Swagger UI: <a href="http://localhost:${HOST_PORT}/swagger-ui/index.html">http://localhost:${HOST_PORT}/swagger-ui/index.html</a></p>
-                                    <p>Check console output: <a href="${env.BUILD_URL}">${env.BUILD_URL}</a></p>
-                                """,
-                                mimeType: 'text/html'
-                            )
-                        } catch (Exception e) {
-                            echo "Async email notification could not be dispatched: ${e.message}"
-                        }
-                    }
-                )
-            }
         }
         failure {
             echo "Pipeline failed. Fetching container logs for debugging:"
             bat "docker logs --tail 100 ${CONTAINER_NAME} 2>nul || ver > nul"
         }
+    }
+}
+
+// Reusable Shared Function using Windows bat curl to dispatch data
+def sendStatusNotification(String stageName, String status, long startTime) {
+    long endTime = System.currentTimeMillis()
+    long duration = endTime - startTime
+    
+    // Format JSON safely for Windows batch execution (double quotes escaped as \")
+    String payload = """{
+        \\"id\\": \\"${env.JOB_NAME}-${env.BUILD_NUMBER}-${stageName.replaceAll(' ', '_')}\\",
+        \\"level\\": \\"${(status == 'FAILED') ? 'ERROR' : 'INFO'}\\",
+        \\"message\\": \\"Stage '${stageName}' finished with status: ${status}\\",
+        \\"timestamp\\": ${endTime},
+        \\"metadata\\": {
+            \\"jobName\\": \\"${env.JOB_NAME}\\",
+            \\"buildNumber\\": \\"${env.BUILD_NUMBER}\\",
+            \\"stageName\\": \\"${stageName}\\",
+            \\"status\\": \\"${status}\\",
+            \\"durationMs\\": ${duration}
+        }
+    }"""
+
+    try {
+        // Run curl step natively matching your precise endpoint specifications
+        bat """
+            curl --location "${env.LOCAL_API_URL}" ^
+            --header "Content-Type: application/json" ^
+            --data "${payload.replaceAll('\n', '').replaceAll(' +', ' ')}"
+        """
+    } catch (Exception e) {
+        // Keeps pipeline healthy if the logging infrastructure acts up
+        echo "Failed to dispatch log via curl for stage ${stageName}: ${e.message}"
     }
 }
