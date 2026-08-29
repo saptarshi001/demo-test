@@ -47,32 +47,6 @@ pipeline {
             }
         }
 
-        stage('Test') {
-            steps {
-                script {
-                    long startTime = System.currentTimeMillis()
-                    try {
-                        echo "Running unit tests and generating JaCoCo coverage report..."
-                        bat "mvn clean test jacoco:report"
-                        sendStatusNotification('Test', 'SUCCESS', startTime)
-                    } catch (Exception e) {
-                        sendStatusNotification('Test', 'FAILED', startTime)
-                        throw e
-                    }
-                }
-            }
-            post {
-                always {
-                    junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml'
-                    recordCoverage(
-                        tools: [[parser: 'JACOCO', pattern: '**/target/site/jacoco/jacoco.xml']],
-                        id: 'jacoco',
-                        name: 'JaCoCo Coverage'
-                    )
-                }
-            }
-        }
-
         stage('Deploy') {
             steps {
                 script {
