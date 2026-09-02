@@ -1,22 +1,8 @@
 pipeline {
     agent any
 
-    tools {
-        maven 'Maven-3.9'
-    }
-
-    options {
-        timeout(time: 20, unit: 'MINUTES')
-        disableConcurrentBuilds()
-        skipDefaultCheckout(true)
-    }
-
     environment {
-        APP_NAME       = 'simple-rest-api'
-        IMAGE_TAG      = "${BUILD_NUMBER}"
-        CONTAINER_NAME = 'simple-api-container'
-        HOST_PORT      = '8082'
-        CONTAINER_PORT = '8080'
+        LOG_ANALYZER_URL = 'http://host.docker.internal:8080'
     }
 
     stages {
@@ -30,7 +16,7 @@ pipeline {
 
         stage('Build') {
             steps {
-                echo 'Building Spring Boot application...'
+                echo 'Building application...'
                 sh 'mvn clean package -DskipTests'
             }
         }
@@ -41,45 +27,92 @@ pipeline {
                 sh 'mvn test'
             }
         }
-
-        stage('Deploy') {
-            steps {
-                echo "Building Docker image: ${APP_NAME}:${IMAGE_TAG}"
-
-                sh """
-                    docker build \
-                        -t ${APP_NAME}:${IMAGE_TAG} \
-                        -t ${APP_NAME}:latest .
-                """
-
-                echo 'Removing old container...'
-
-                sh """
-                    docker rm -f ${CONTAINER_NAME} || true
-                """
-
-                echo 'Starting new container...'
-
-                sh """
-                    docker run -d \
-                        --name ${CONTAINER_NAME} \
-                        --restart unless-stopped \
-                        -p ${HOST_PORT}:${CONTAINER_PORT} \
-                        ${APP_NAME}:${IMAGE_TAG}
-                """
-
-                echo 'Deployment completed successfully!'
-            }
-        }
     }
 
     post {
-        success {
-            echo 'Pipeline completed successfully!'
-        }
 
         failure {
-            echo 'Pipeline failed.'
+            script {
+
+                echo '========================================='
+                echo 'BUILD FAILED - STARTING AI LOG ANALYSIS'
+                echo '========================================='
+
+                def failedStage = env.STAGE_NAME ?: 'Unknown'
+                def buildId = "${env.JOB_NAME}-${env.BUILD_NUMBER}"
+
+                echo "Build ID: ${buildId}"
+                echo "Job Name: ${env.JOB_NAME}"
+                echo "Failed Stage: ${failedStage}"
+
+                /*
+                 * Get Jenkins console output.
+                 *
+                 * currentBuild.rawBuild.getLog(500)
+                 * retrieves the last 500 lines.
+                 */
+                def consoleLogs = currentBuild.rawBuild
+                        .getLog(500)
+                        .join('\n')
+
+                /*
+                 * Escape logs so they can safely be sent as JSON.
+                 */
+                def escapedLogs = consoleLogs
+                        .replace('\\', '\\\\')
+                        .replace('"', '\\"')
+                        .replace('\n', '\\n')
+                        .replace('\r', '')
+
+                echo 'Sending failed build logs to DevOps Log Analyzer...'
+
+                def payload = """
+                {
+                    "buildId": "${buildId}",
+                    "jobName": "${env.JOB_NAME}",
+                    "status": "FAILED",
+                    "stageName": "${failedStage}",
+                    "errorDetails": "${escapedLogs}",
+                    "rootCause": "",
+                    "resolution": ""
+                }
+                """
+
+                /*
+                 * Step 1:
+                 * Store the failed incident/log.
+                 *
+                 * Change /logs/bulk if your actual ingestion
+                 * endpoint uses a different request structure.
+                 */
+                sh """
+                    curl -X POST '${LOG_ANALYZER_URL}/logs/bulk' \
+                    -H 'Content-Type: application/json' \
+                    -d '${payload}'
+                """
+
+                echo 'Requesting RAG analysis...'
+
+                /*
+                 * Step 2:
+                 * Ask the AI DevOps Log Analyzer to search
+                 * historical incidents and analyze this failure.
+                 */
+                def analysisPayload = """
+                {
+                    "query": "JOB: ${env.JOB_NAME}
+                    BUILD: ${buildId}
+                    FAILED STAGE: ${failedStage}
+                    ERROR: ${escapedLogs}"
+                }
+                """
+
+                sh """
+                    curl -X POST '${LOG_ANALYZER_URL}/logs/analyze' \
+                    -H 'Content-Type: application/json' \
+                    -d '${analysisPayload}'
+                """
+            }
         }
 
         always {
