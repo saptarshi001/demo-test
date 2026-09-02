@@ -1,3 +1,5 @@
+import groovy.json.JsonOutput
+
 pipeline {
     agent any
 
@@ -16,15 +18,29 @@ pipeline {
 
         stage('Build') {
             steps {
-                echo 'Building application...'
-                sh 'mvn clean package -DskipTests'
+                script {
+                    try {
+                        echo 'Building application...'
+                        sh 'mvn clean package -DskipTests'
+                    } catch (Exception e) {
+                        env.FAILED_STAGE = 'Build'
+                        throw e
+                    }
+                }
             }
         }
 
         stage('Test') {
             steps {
-                echo 'Running tests...'
-                sh 'mvn test'
+                script {
+                    try {
+                        echo 'Running tests...'
+                        sh 'mvn test'
+                    } catch (Exception e) {
+                        env.FAILED_STAGE = 'Test'
+                        throw e
+                    }
+                }
             }
         }
     }
@@ -38,80 +54,46 @@ pipeline {
                 echo 'BUILD FAILED - STARTING AI LOG ANALYSIS'
                 echo '========================================='
 
-                def failedStage = env.STAGE_NAME ?: 'Unknown'
                 def buildId = "${env.JOB_NAME}-${env.BUILD_NUMBER}"
+
+                def failedStage = env.FAILED_STAGE ?: 'Unknown'
 
                 echo "Build ID: ${buildId}"
                 echo "Job Name: ${env.JOB_NAME}"
                 echo "Failed Stage: ${failedStage}"
 
-                /*
-                 * Get Jenkins console output.
-                 *
-                 * currentBuild.rawBuild.getLog(500)
-                 * retrieves the last 500 lines.
-                 */
+                // Capture last 100 lines of Jenkins console
                 def consoleLogs = currentBuild.rawBuild
-                        .getLog(500)
+                        .getLog(100)
                         .join('\n')
 
-                /*
-                 * Escape logs so they can safely be sent as JSON.
-                 */
-                def escapedLogs = consoleLogs
-                        .replace('\\', '\\\\')
-                        .replace('"', '\\"')
-                        .replace('\n', '\\n')
-                        .replace('\r', '')
+                def query = """
+JOB NAME: ${env.JOB_NAME}
+BUILD ID: ${buildId}
+STATUS: FAILED
+FAILED STAGE: ${failedStage}
 
-                echo 'Sending failed build logs to DevOps Log Analyzer...'
+ACTUAL JENKINS ERROR LOGS:
+${consoleLogs}
+"""
 
-                def payload = """
-                {
-                    "buildId": "${buildId}",
-                    "jobName": "${env.JOB_NAME}",
-                    "status": "FAILED",
-                    "stageName": "${failedStage}",
-                    "errorDetails": "${escapedLogs}",
-                    "rootCause": "",
-                    "resolution": ""
-                }
-                """
+                // Safely generate JSON
+                def payload = JsonOutput.toJson([
+                    query: query
+                ])
 
-                /*
-                 * Step 1:
-                 * Store the failed incident/log.
-                 *
-                 * Change /logs/bulk if your actual ingestion
-                 * endpoint uses a different request structure.
-                 */
-                sh """
-                    curl -X POST '${LOG_ANALYZER_URL}/logs/bulk' \
-                    -H 'Content-Type: application/json' \
-                    -d '${payload}'
-                """
+                writeFile(
+                    file: 'failure-analysis.json',
+                    text: payload
+                )
 
-                echo 'Requesting RAG analysis...'
+                echo 'Sending failure to DevOps Log Analyzer...'
 
-                /*
-                 * Step 2:
-                 * Ask the AI DevOps Log Analyzer to search
-                 * historical incidents and analyze this failure.
-                 */
-                def analysisPayload = """
-                {
-                    "query": "JOB: ${env.JOB_NAME}
-                    BUILD: ${buildId}
-                    FAILED STAGE: ${failedStage}
-                    ERROR: ${escapedLogs}"
-                }
-                """
-
-                sh """
-                    curl -X POST '${LOG_ANALYZER_URL}/logs/analyze' \
-                    -H 'Content-Type: application/json' \
-                    -d '${analysisPayload}'
-                """
+                sh '''
+                    curl -X POST "$LOG_ANALYZER_URL/logs/analyze" \
+                      -H "Content-Type: application/json" \
+                      --data @failure-analysis.json
+                '''
             }
         }
 
