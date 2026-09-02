@@ -1,6 +1,10 @@
 pipeline {
     agent any
 
+    tools {
+        maven 'Maven-3.9'
+    }
+
     options {
         timeout(time: 20, unit: 'MINUTES')
         disableConcurrentBuilds()
@@ -26,33 +30,36 @@ pipeline {
 
         stage('Build') {
             steps {
-                echo "Building application..."
+                echo 'Building Spring Boot application...'
                 sh 'mvn clean package -DskipTests'
             }
         }
 
         stage('Test') {
             steps {
-                echo "Running tests..."
+                echo 'Running tests...'
                 sh 'mvn test'
             }
         }
 
         stage('Deploy') {
             steps {
-                echo "Building Docker image..."
+                echo "Building Docker image: ${APP_NAME}:${IMAGE_TAG}"
+
                 sh """
                     docker build \
                         -t ${APP_NAME}:${IMAGE_TAG} \
                         -t ${APP_NAME}:latest .
                 """
 
-                echo "Stopping old container if it exists..."
+                echo 'Removing old container...'
+
                 sh """
                     docker rm -f ${CONTAINER_NAME} || true
                 """
 
-                echo "Starting new container..."
+                echo 'Starting new container...'
+
                 sh """
                     docker run -d \
                         --name ${CONTAINER_NAME} \
@@ -61,7 +68,7 @@ pipeline {
                         ${APP_NAME}:${IMAGE_TAG}
                 """
 
-                echo "Deployment completed successfully."
+                echo 'Deployment completed successfully!'
             }
         }
     }
