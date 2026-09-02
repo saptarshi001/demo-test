@@ -2,7 +2,7 @@ pipeline {
     agent any
 
     environment {
-        LOG_ANALYZER_URL = 'http://host.docker.internal:8080'
+        LOG_ANALYZER_URL = 'http://host.docker.internal:8082'
     }
 
     stages {
