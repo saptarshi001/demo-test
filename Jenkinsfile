@@ -90,7 +90,7 @@ ${consoleLogs}
                 echo 'Sending failure to DevOps Log Analyzer...'
 
                 sh '''
-                    curl -X POST "$LOG_ANALYZER_URL/logs/analyze" \
+                    curl -X POST "$LOG_ANALYZER_URL/api/logs/analyze" \
                       -H "Content-Type: application/json" \
                       --data @failure-analysis.json
                 '''
